@@ -1,0 +1,3 @@
+All scripts require a new version of the math Python package to compute binomial coefficients, floor and ceil functions. 
+
+This package is available in Python 3.8.10 and above.

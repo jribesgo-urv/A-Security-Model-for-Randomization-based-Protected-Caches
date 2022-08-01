@@ -1,0 +1,189 @@
+diff --git a/inc/block.h b/inc/block.h
+old mode 100644
+new mode 100755
+diff --git a/inc/cache.h b/inc/cache.h
+old mode 100644
+new mode 100755
+index a16324a..a6dcb7d
+--- a/inc/cache.h
++++ b/inc/cache.h
+@@ -70,7 +70,7 @@ extern uint32_t PAGE_TABLE_LATENCY, SWAP_LATENCY;
+ #define L2C_LATENCY 10  // 4/5 (L1I or L1D) + 10 = 14/15 cycles
+ 
+ // LAST LEVEL CACHE
+-#define LLC_SET NUM_CPUS*2048
++#define LLC_SET 12*1024//NUM_CPUS*2048
+ #define LLC_WAY 16
+ #define LLC_RQ_SIZE NUM_CPUS*L2C_MSHR_SIZE //48
+ #define LLC_WQ_SIZE NUM_CPUS*L2C_MSHR_SIZE //48
+@@ -90,6 +90,9 @@ class CACHE : public MEMORY {
+     uint32_t reads_available_this_cycle;
+     uint8_t cache_type;
+ 
++    // random key
++    uint64_t rkey = 0;
++
+     // prefetch stats
+     uint64_t pf_requested,
+              pf_issued,
+@@ -170,6 +173,8 @@ class CACHE : public MEMORY {
+          add_wq(PACKET *packet),
+          add_pq(PACKET *packet);
+ 
++    void set_key(uint64_t key) { rkey = key ;} ;
++    uint64_t get_key() {  return rkey;} ;
+     void return_data(PACKET *packet),
+          operate(),
+          increment_WQ_FULL(uint64_t address);
+@@ -211,6 +216,7 @@ class CACHE : public MEMORY {
+          llc_prefetcher_final_stats();
+     void (*l1i_prefetcher_cache_operate)(uint32_t, uint64_t, uint8_t, uint8_t);
+     void (*l1i_prefetcher_cache_fill)(uint32_t, uint64_t, uint32_t, uint32_t, uint8_t, uint64_t);
++    void invalidate_all();
+ 
+     uint32_t l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in),
+          llc_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in),
+diff --git a/inc/champsim.h b/inc/champsim.h
+old mode 100644
+new mode 100755
+diff --git a/inc/dram_controller.h b/inc/dram_controller.h
+old mode 100644
+new mode 100755
+diff --git a/inc/instruction.h b/inc/instruction.h
+old mode 100644
+new mode 100755
+diff --git a/inc/kpcp.h b/inc/kpcp.h
+old mode 100644
+new mode 100755
+diff --git a/inc/memory_class.h b/inc/memory_class.h
+old mode 100644
+new mode 100755
+diff --git a/inc/ooo_cpu.h b/inc/ooo_cpu.h
+old mode 100644
+new mode 100755
+diff --git a/inc/set.h b/inc/set.h
+old mode 100644
+new mode 100755
+diff --git a/inc/spp_dev.h b/inc/spp_dev.h
+old mode 100644
+new mode 100755
+diff --git a/inc/uncore.h b/inc/uncore.h
+old mode 100644
+new mode 100755
+diff --git a/src/block.cc b/src/block.cc
+old mode 100644
+new mode 100755
+diff --git a/src/cache.cc b/src/cache.cc
+old mode 100644
+new mode 100755
+index 6ea306a..8e91214
+--- a/src/cache.cc
++++ b/src/cache.cc
+@@ -1055,7 +1055,13 @@ void CACHE::operate()
+ 
+ uint32_t CACHE::get_set(uint64_t address)
+ {
+-    return (uint32_t) (address & ((1 << lg2(NUM_SET)) - 1)); 
++        
++	uint64_t rand_address = address;
++	if (IS_LLC) {
++		rand_address = address ^ rkey;
++	} 
++	
++	return (uint32_t) (rand_address & ((1 << lg2(NUM_SET)) - 1)); 
+ }
+ 
+ uint32_t CACHE::get_way(uint64_t address, uint32_t set)
+@@ -1148,6 +1154,19 @@ int CACHE::check_hit(PACKET *packet)
+     return match_way;
+ }
+ 
++void CACHE::invalidate_all()
++{
++
++    for (uint32_t set=0; set<NUM_SET; set++){
++	    for (uint32_t way=0; way<NUM_WAY; way++) {
++        	    block[set][way].dirty = 1;
++	    }
++    }
++
++}
++
++
++
+ int CACHE::invalidate_entry(uint64_t inval_addr)
+ {
+     uint32_t set = get_set(inval_addr);
+diff --git a/src/dram_controller.cc b/src/dram_controller.cc
+old mode 100644
+new mode 100755
+diff --git a/src/main.cc b/src/main.cc
+old mode 100644
+new mode 100755
+index 3544e0d..8f6a85d
+--- a/src/main.cc
++++ b/src/main.cc
+@@ -14,8 +14,10 @@ uint8_t warmup_complete[NUM_CPUS],
+         knob_low_bandwidth = 0;
+ 
+ uint64_t warmup_instructions     = 1000000,
+-         simulation_instructions = 10000000,
++         simulation_instructions = 100000000,
+          champsim_seed;
++uint64_t rekey_period = 2;
++int rekeyed = 0;
+ 
+ time_t start_time;
+ 
+@@ -524,12 +526,13 @@ int main(int argc, char** argv)
+             {"cloudsuite", no_argument, 0, 'c'},
+             {"low_bandwidth",  no_argument, 0, 'b'},
+             {"traces",  no_argument, 0, 't'},
++	    {"rperiod", required_argument, 0, 'r'},
+             {0, 0, 0, 0}      
+         };
+ 
+         int option_index = 0;
+ 
+-        c = getopt_long_only(argc, argv, "wihsb", long_options, &option_index);
++        c = getopt_long_only(argc, argv, "wihsbr", long_options, &option_index);
+ 
+         // no more option characters
+         if (c == -1)
+@@ -557,6 +560,9 @@ int main(int argc, char** argv)
+             case 't':
+                 traces_encountered = 1;
+                 break;
++	    case 'r':
++		rekey_period = atol(optarg);
++		break;
+             default:
+                 abort();
+         }
+@@ -797,11 +803,19 @@ int main(int argc, char** argv)
+                  elapsed_hour = elapsed_minute / 60;
+         elapsed_minute -= elapsed_hour*60;
+         elapsed_second -= (elapsed_hour*3600 + elapsed_minute*60);
++       
++        int access_count = uncore.LLC.sim_access[0][0] + uncore.LLC.sim_access[0][1] + uncore.LLC.sim_access[0][2] + uncore.LLC.sim_access[0][3];	
++	if (access_count % rekey_period == 0){
++	       	if (rekeyed == 0){
++			uncore.LLC.set_key(rand());
++			uncore.LLC.invalidate_all();
++			rekeyed = 1;
++		}
++	} else	rekeyed = 0; 
+ 
+         for (int i=0; i<NUM_CPUS; i++) {
+             // proceed one cycle
+             current_core_cycle[i]++;
+-
+             //cout << "Trying to process instr_id: " << ooo_cpu[i].instr_unique_id << " fetch_stall: " << +ooo_cpu[i].fetch_stall;
+             //cout << " stall_cycle: " << stall_cycle[i] << " current: " << current_core_cycle[i] << endl;
+ 
+diff --git a/src/ooo_cpu.cc b/src/ooo_cpu.cc
+old mode 100644
+new mode 100755
+diff --git a/src/uncore.cc b/src/uncore.cc
+old mode 100644
+new mode 100755
